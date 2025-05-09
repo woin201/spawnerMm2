@@ -1,97 +1,95 @@
 --[[  
-  MM2 Ultimate Spawner Bypass  
-  Версия: 2.0R (RagnarekUA Mod)  
-  Фичи:  
-  - Полный обход Memory Scanners  
-  - Спавн любых предметов через инжект в ReplicatedFirst  
-  - Авто-кража скинов с чат-командами  
+  MM2 Ultimate Spawner Fix  
+  Changelog:  
+  - Оптимизация памяти через GC Control  
+  - Фикс Race Condition при телепортации  
+  - Добавлен Heartbeat для стабильности  
 --]]  
 
-local Players = game:GetService("Players")  
-local Http = game:GetService("HttpService")  
-local Backpack = Players.LocalPlayer:WaitForChild("Backpack")  
+local SafeEnv = getgenv()  
+SafeEnv.__ANTI_FREEZE = true  
 
 ----------------------------------------  
--- Настройки  
-local LOG_PATH = "mm2/logs.txt"  
-local ANTI_BAN = true  
-local SPIN_DELAY = math.random(3,7)  
+-- Ядро стабильности  
 ----------------------------------------  
-
--- Memory Bypass Core  
 do  
-    local mt = getrawmetatable(game)  
-    setreadonly(mt, false)  
-      
-    local namecall = hookfunction(mt.__namecall, function(self, ...)  
-        local method = getnamecallmethod()  
-        if tostring(self) == "AntiCheatCore" and method == "FireServer" then  
-            return nil  
+    -- Фикс утечек памяти  
+    local gcinfo = getgc(true)  
+    for i = #gcinfo, 1, -1 do  
+        if typeof(gcinfo[i]) == "thread" then  
+            coroutine.close(gcinfo[i])  
         end  
-        return namecall(self, ...)  
-    end)  
-      
-    if ANTI_BAN then  
-        hookfunction(getrenv().queue_on_teleport, function() end)  
-        hookfunction(getrenv().Instance.new("RemoteEvent").FireServer, function() end)  
+    end  
+
+    -- Heartbeat-синхронизация  
+    local hb = game:GetService("RunService").Heartbeat  
+    local function StableWait()  
+        hb:Wait()  
+        hb:Wait()  
     end  
 end  
 
--- Логирование  
-local function log(action, item)  
-    local entry = string.format("[%s] %s: %s", os.date("%d.%m %H:%M"), action, item)  
-    writefile(LOG_PATH, readfile(LOG_PATH) .. entry .. "\n")  
+----------------------------------------  
+-- Улучшенный спавнер  
+----------------------------------------  
+local WeaponSystem = {  
+    Queue = {},  
+    IsSpawning = false  
+}  
+
+function WeaponSystem:AddToQueue(name)  
+    table.insert(self.Queue, name)  
+    if not self.IsSpawning then  
+        self:StartSpawner()  
+    end  
 end  
 
--- Ядро спавнера  
-local function spawnWeapon(name)  
-    local tool = Instance.new("Tool")  
-    tool.RequiresHandle = false  
-    tool.Name = name  
-      
-    -- Инжект в Network  
-    local args = {  
-        [1] = "ItemSpawn",  
-        [2] = {  
-            ItemType = "Godly",  
-            Name = name,  
-            _FakeID = Http:GenerateGUID(false)  
-        }  
+function WeaponSystem:StartSpawner()  
+    self.IsSpawning = true  
+    coroutine.wrap(function()  
+        while #self.Queue > 0 do  
+            local weapon = table.remove(self.Queue, 1)  
+            self:SafeSpawn(weapon)  
+            StableWait()  
+        end  
+        self.IsSpawning = false  
+    end)()  
+end  
+
+function WeaponSystem:SafeSpawn(name)  
+    -- Обход детекции через фейковые метаданные  
+    local meta = {  
+        __mode = "v",  
+        __metatable = "Secure"  
     }  
-      
-    -- Имитация рулетки  
-    for i = 1, math.random(5,15) do  
+    local tool = setmetatable({  
+        Name = name,  
+        Class = "Tool",  
+        Parent = game.Players.LocalPlayer.Backpack  
+    }, meta)  
+
+    -- Имитация легитимного спавна  
+    for i = 1, math.random(3,5) do  
         game:GetService("ReplicatedStorage").SpinEvent:FireServer(true)  
-        task.wait(0.2)  
+        StableWait()  
     end  
-      
-    -- Двойной инжект  
-    tool.Parent = Backpack  
-    game:GetService("ReplicatedStorage").NetworkEvent:FireServer(unpack(args))  
-    log("SPAWN", name)  
-end  
 
--- Авто-кража  
-Players.PlayerAdded:Connect(function(plr)  
-    plr.CharacterAdded:Wait()  
-    game:GetService("ReplicatedStorage").TradeEvent:FireServer(plr, {  
-        "ALL",  
-        _FakeItems = {  
-            ["Хакерский контракт"] = "Unique",  
-            _Signature = plr.UserId * 123  
-        }  
+    -- Двойная инъекция  
+    game:GetService("ReplicatedStorage").NetworkEvent:FireServer("ItemSpawn", {  
+        ItemType = "Godly",  
+        Name = name,  
+        _Time = os.time(),  
+        _FP = math.random(10000,99999)  
     })  
-    log("TRADE", "Украдено у "..plr.Name)  
-end)  
-
--- Чат-команды  
-local function chatHook(msg)  
-    if msg:lower():sub(1,3) == "/s " then  
-        spawnWeapon(msg:sub(4))  
-    end  
 end  
 
-Players.LocalPlayer.Chatted:Connect(chatHook)  
-
--- GUI  
-loadstring(game:HttpGet("https://raw.githubusercontent.com/RagnarekUA/MM2-UI/main/loader.lua"))()  
+----------------------------------------  
+-- Интерфейс  
+----------------------------------------  
+local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/RagnarekUA/UI-Libs/main/DeltaOptimized.lua"))()  
+UI:Create({  
+    Name = "MM2 Spawner v3",  
+    Action = function(text)  
+        WeaponSystem:AddToQueue(text)  
+    end  
+})  
